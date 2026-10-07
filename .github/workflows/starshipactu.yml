@@ -1,0 +1,39 @@
+name: StarshipActu auto
+ 
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # toutes les 20 minutes
+  workflow_dispatch:          # permet aussi de le lancer à la main
+ 
+permissions:
+  contents: write             # pour sauvegarder l'état entre deux passages
+ 
+concurrency:
+  group: starshipactu
+  cancel-in-progress: false
+ 
+jobs:
+  verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+ 
+      - name: Installer les dépendances
+        run: pip install pillow requests tzdata
+ 
+      - name: Vérifier la page et publier sur Discord
+        run: python starshipactu_auto.py --once
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+ 
+      - name: Sauvegarder l'état (évite de republier la même chose)
+        run: |
+          git config user.name "starshipactu-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add sortie/etat.json
+          git diff --cached --quiet || (git commit -m "Mise à jour de l'état" && git push)
+.github
