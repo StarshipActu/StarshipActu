@@ -12,6 +12,9 @@ Utilisation :
     python starshipactu_auto.py --once --force   -> régénère même si rien n'a changé
     python starshipactu_auto.py --debug      -> affiche ce que le script a compris de la page
     python starshipactu_auto.py --html page.html --once --inclure-termine   -> test sur un fichier local
+
+Nouveauté : à chaque mise à jour, les anciens messages Discord (dont les IDs sont
+gardés dans sortie/etat.json) sont supprimés après la publication des nouveaux.
 """
 import argparse, hashlib, json, os, random, re, sys, time
 from datetime import datetime
@@ -239,10 +242,29 @@ def carte(titre, sous_titre, lieu, fenetres, teinte, chemin):
 
 # --------------------------------- envoi / boucle ---------------------------------
 def envoyer_discord(chemin, message):
+    """Publie l'image et renvoie l'ID du message créé (None si pas de webhook)."""
+    if not DISCORD_WEBHOOK:
+        return None
+    with open(chemin, "rb") as f:
+        # wait=true : Discord renvoie le message créé, donc son ID
+        r = requests.post(DISCORD_WEBHOOK, params={"wait": "true"}, data={"content": message},
+                          files={"file": (Path(chemin).name, f)}, timeout=30)
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def supprimer_discord(ids):
+    """Supprime les anciens messages publiés par ce webhook."""
     if not DISCORD_WEBHOOK:
         return
-    with open(chemin, "rb") as f:
-        requests.post(DISCORD_WEBHOOK, data={"content": message}, files={"file": (Path(chemin).name, f)}, timeout=30)
+    for mid in ids:
+        try:
+            r = requests.delete(f"{DISCORD_WEBHOOK}/messages/{mid}", timeout=30)
+        except requests.RequestException as e:
+            print("Suppression échouée", mid, e, file=sys.stderr)
+            continue
+        if r.status_code not in (204, 404):  # 404 = déjà supprimé
+            print("Suppression échouée", mid, r.status_code, r.text, file=sys.stderr)
 
 
 def verifier(args):
@@ -257,11 +279,12 @@ def verifier(args):
     sortie = Path(SORTIE)
     sortie.mkdir(exist_ok=True)
     etat = sortie / "etat.json"
-    ancien = json.loads(etat.read_text())["sig"] if etat.exists() else None
+    donnees = json.loads(etat.read_text()) if etat.exists() else {}
+    ancien = donnees.get("sig")
+    ids_anciens = donnees.get("messages", [])
     if signature == ancien and not args.force:
         print(datetime.now().strftime("%H:%M"), "Rien de nouveau.")
         return
-    etat.write_text(json.dumps({"sig": signature}))
     horodatage = datetime.now().strftime("%Y%m%d_%H%M")
     creees = []
     groupes = {}
@@ -285,9 +308,21 @@ def verifier(args):
         creees.append((chemin, "Fermeture de plage"))
     if not creees:
         print("Aucune fermeture ni retard en cours (plage :", statut + ").")
+
+    # 1) publier les nouveaux messages
+    ids_nouveaux = []
     for chemin, titre in creees:
         print("Image créée :", chemin)
-        envoyer_discord(chemin, f"{titre} : mise à jour")
+        mid = envoyer_discord(chemin, f"{titre} : mise à jour")
+        if mid:
+            ids_nouveaux.append(mid)
+
+    # 2) supprimer les anciens seulement après la publication des nouveaux
+    supprimer_discord(ids_anciens)
+
+    # 3) sauvegarder la signature ET les IDs (état écrit en dernier : si l'envoi
+    #    échoue plus haut, on réessaie au prochain tour sans perdre les anciens IDs)
+    etat.write_text(json.dumps({"sig": signature, "messages": ids_nouveaux}))
 
 
 def main():
